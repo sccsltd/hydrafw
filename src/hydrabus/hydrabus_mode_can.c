@@ -102,7 +102,9 @@ static void can_slcan_out(t_hydra_console *con, can_rx_frame *msg)
 
 static bsp_status_t can_slcan_in(uint8_t *slcanmsg, can_tx_frame *msg)
 {
-	uint8_t data_index, i;
+	uint8_t data_index, i, dlc;
+
+	memset(msg, 0, sizeof(*msg));
 	switch(slcanmsg[0]) {
 	case 't':
 		msg->header.RTR = CAN_RTR_DATA;
@@ -128,7 +130,8 @@ static bsp_status_t can_slcan_in(uint8_t *slcanmsg, can_tx_frame *msg)
 		msg->header.StdId = hexchartonibble(slcanmsg[1])<<8;
 		msg->header.StdId |= hexchartonibble(slcanmsg[2])<<4;
 		msg->header.StdId |= hexchartonibble(slcanmsg[3]);
-		msg->header.DLC = hexchartonibble(slcanmsg[4])%8;
+		dlc = hexchartonibble(slcanmsg[4]);
+		msg->header.DLC = (dlc > 8) ? 8 : dlc;
 		data_index = 5;
 	} else {
 		msg->header.ExtId = hexchartonibble(slcanmsg[1])<<28;
@@ -139,11 +142,14 @@ static bsp_status_t can_slcan_in(uint8_t *slcanmsg, can_tx_frame *msg)
 		msg->header.ExtId |= hexchartonibble(slcanmsg[6])<<8;
 		msg->header.ExtId |= hexchartonibble(slcanmsg[7])<<4;
 		msg->header.ExtId |= hexchartonibble(slcanmsg[8]);
-		msg->header.DLC = hexchartonibble(slcanmsg[9])%8;
+		dlc = hexchartonibble(slcanmsg[9]);
+		msg->header.DLC = (dlc > 8) ? 8 : dlc;
 		data_index = 10;
 	}
-	for(i=0; i<msg->header.DLC; i+=2) {
-		msg->data[i] = hex2byte((char *)&slcanmsg[data_index+i]);
+	/* Lawicel: DLC hex digits, then DLC bytes as pairs. DLC 8 is 8, not 8%8==0.
+	   Each payload byte is two hex chars — do not step i by 2 in the data[]. */
+	for (i = 0; i < msg->header.DLC; i++) {
+		msg->data[i] = hex2byte((char *)&slcanmsg[data_index + (i * 2)]);
 	}
 
 
@@ -189,6 +195,7 @@ void slcan(t_hydra_console *con) {
 	thread_t *rthread = NULL;
 
 	while (!hydrabus_ubtn()) {
+		memset(buff, 0, sizeof(buff));
 		slcan_read_command(con, buff);
 		switch (buff[0]) {
 		case 'S':
@@ -453,9 +460,10 @@ static int exec(t_hydra_console *con, t_tokenline_parsed *p, int token_pos)
 			t+=3;
 			break;
 		case T_ID:
-			/* Integer parameter. */
+			/* Same offset as T_SPEED — t+3 was reading off the token stream
+			   (bench: `id 0x720` set 1159253378 instead of 1824). */
 			t += 2;
-			memcpy(&arg_int, p->buf + p->tokens[t+3], sizeof(int));
+			memcpy(&arg_int, p->buf + p->tokens[t], sizeof(int));
 			proto->config.can.can_id = arg_int;
 			cprintf(con, "ID set to %d\r\n", proto->config.can.can_id);
 			break;
