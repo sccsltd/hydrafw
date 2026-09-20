@@ -687,6 +687,7 @@ void openOCD(t_hydra_console *con)
 				break;
 			case CMD_OCD_FEATURE:
 				if(chnRead(con->sdu, ocd_parameters, 2) == 2) {
+					bool reinitialize_jtag_pins = true;
 					switch(ocd_parameters[0]) {
 					case FEATURE_LED:
 						/* Not implemented */
@@ -698,7 +699,20 @@ void openOCD(t_hydra_console *con)
 						//TODO
 						break;
 					case FEATURE_SRST:
-						//TODO
+						/* Ford SPC5 recovery: PB7 is wired to active-low RESET.
+						 * Assert by driving low; release to high impedance so the
+						 * target's 5 V pull-up supplies a valid reset-high level. */
+						if (ocd_parameters[1]) {
+							bsp_gpio_init(BSP_GPIO_PORTB, proto->config.jtag.trst_pin,
+								MODE_CONFIG_DEV_GPIO_OUT_PUSHPULL,
+								MODE_CONFIG_DEV_GPIO_NOPULL);
+							jtag_trst_low(con);
+						} else {
+							bsp_gpio_init(BSP_GPIO_PORTB, proto->config.jtag.trst_pin,
+								MODE_CONFIG_DEV_GPIO_IN,
+								MODE_CONFIG_DEV_GPIO_NOPULL);
+						}
+						reinitialize_jtag_pins = false;
 						break;
 					case FEATURE_PULLUP:
 						if(ocd_parameters[1]) {
@@ -708,7 +722,8 @@ void openOCD(t_hydra_console *con)
 						}
 						break;
 					}
-					jtag_pin_init(con);
+					if (reinitialize_jtag_pins)
+						jtag_pin_init(con);
 				} else {
 					cprint(con, "\x00", 1);
 				}

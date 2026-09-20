@@ -37,7 +37,8 @@ const SDCConfig sdccfg = {
 void hydrabus_init(void)
 {
 	/* Configure PA0 UBTN as Input for test purpose blink test */
-	palSetPadMode(GPIOA, 0, PAL_MODE_INPUT);
+	/* Active-high UBTN. Floating left the pin high after DFU and slcan exited at once. */
+	palSetPadMode(GPIOA, 0, PAL_MODE_INPUT_PULLDOWN);
 
 	/* Configure PA4 ULED as Output for test purpose blink test */
 	palSetPadMode(GPIOA, 4, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);

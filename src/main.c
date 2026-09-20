@@ -42,6 +42,9 @@
 #include "hydrabus/hydrabus_bbio.h"
 #include "hydrabus/hydrabus_sump.h"
 #include "hydrabus/hydrabus_serprog.h"
+#ifdef HYDRAFW_SLCAN_ONLY
+#include "hydrabus/hydrabus_mode_can.h"
+#endif
 
 #include "bsp.h"
 #include "bsp_print_dbg.h"
@@ -86,6 +89,10 @@ THD_FUNCTION(console, arg)
 
 	con = arg;
 	chRegSetThreadName(con->thread_name);
+#ifdef HYDRAFW_SLCAN_ONLY
+	slcan_boot(con);
+	return;
+#endif
 	tl_init(con->tl, tl_tokens, tl_dict, print, con);
 	con->tl->prompt = PROMPT;
 	tl_set_callback(con->tl, execute);

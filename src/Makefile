@@ -11,10 +11,17 @@ export STM32F4XX ?= 1
 
 # Set to 1 HYDRAFW_NFC to include HydraNFC extension support
 export HYDRAFW_NFC ?= 1
+# Lawicel-only image (CANable-style). No tokenline, no NFC.
+export HYDRAFW_SLCAN_ONLY ?= 0
 export HYDRAFW_DEBUG ?= 0
 export FW_REVISION := $(shell build-scripts/hydrafw-revision)
 
 HYDRAFW_OPTS =
+
+ifeq ($(HYDRAFW_SLCAN_ONLY),1)
+HYDRAFW_NFC = 0
+HYDRAFW_OPTS += -DHYDRAFW_SLCAN_ONLY
+endif
 
 ifeq ($(HYDRAFW_NFC),1)
 HYDRAFW_OPTS += -DHYDRANFC

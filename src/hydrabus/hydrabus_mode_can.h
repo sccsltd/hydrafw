@@ -27,3 +27,4 @@
 #define SLCAN_BUFF_LEN 50
 
 void slcan(t_hydra_console *con);
+void slcan_boot(t_hydra_console *con);

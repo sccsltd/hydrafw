@@ -479,6 +479,25 @@ bsp_status_t bsp_can_write(bsp_dev_can_t dev_num, can_tx_frame* tx_msg)
 }
 
 /**
+  * @brief  Queue a TX frame if a mailbox is free. Never waits.
+  *         slcan needs this so USB RX keeps moving while the bus is busy.
+  */
+bsp_status_t bsp_can_try_write(bsp_dev_can_t dev_num, can_tx_frame* tx_msg)
+{
+	CAN_HandleTypeDef* hcan;
+	bsp_status_t status;
+	uint32_t dummy;
+
+	hcan = &can_handle[dev_num];
+	if (HAL_CAN_GetTxMailboxesFreeLevel(hcan) == 0)
+		return BSP_BUSY;
+	status = (bsp_status_t) HAL_CAN_AddTxMessage(hcan, &(tx_msg->header), tx_msg->data, &dummy);
+	if (status == BSP_ERROR)
+		can_error(dev_num);
+	return status;
+}
+
+/**
   * @brief  Read a message in blocking mode and return the status.
   * @param  dev_num: CAN dev num.
   * @param  rx_msg: Message to receive.

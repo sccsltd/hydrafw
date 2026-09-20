@@ -24,10 +24,13 @@
 #include "hydrabus_mode_can.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdbool.h>
+#include <stddef.h>
 
 static int exec(t_hydra_console *con, t_tokenline_parsed *p, int token_pos);
 static int show(t_hydra_console *con, t_tokenline_parsed *p);
 static uint32_t read(t_hydra_console *con, uint8_t *rx_data, uint8_t nb_data);
+static void slcan_write_nb(t_hydra_console *con, const char *data, size_t n);
 
 static const char* str_pins_can[] = {
 	"TX: PB9\r\nRX: PB8\r\n",
@@ -48,6 +51,7 @@ static void init_proto_default(t_hydra_console *con)
 	proto->dev_num = 0;
 	proto->config.can.dev_speed = 500000;
 	proto->config.can.dev_mode = BSP_CAN_MODE_RO;
+	proto->wwr = 0;
 
 	/* TS1 = 15TQ, TS2 = 5TQ, SJW = 2TQ */
 	proto->config.can.dev_timing = 0x14e0000;
@@ -97,7 +101,9 @@ static void can_slcan_out(t_hydra_console *con, can_rx_frame *msg)
 		snprintf(slcanmsg+offset, 3, "%02X", (unsigned int)msg->data[i]);
 		offset += 2;
 	}
-	cprintf(con, "%s\r", slcanmsg);
+	if (offset + 1 < (int)sizeof(slcanmsg))
+		slcanmsg[offset++] = '\r';
+	slcan_write_nb(con, slcanmsg, (size_t)offset);
 }
 
 static bsp_status_t can_slcan_in(uint8_t *slcanmsg, can_tx_frame *msg)
@@ -156,169 +162,190 @@ static bsp_status_t can_slcan_in(uint8_t *slcanmsg, can_tx_frame *msg)
 	return BSP_OK;
 }
 
-static void slcan_read_command(t_hydra_console *con, uint8_t *buff){
-	uint8_t i=0;
-	uint8_t input = 0;
-	uint8_t bytes_read = 0;
-	while(!hydrabus_ubtn() && input!='\r' && i<SLCAN_BUFF_LEN){
-		bytes_read = chnReadTimeout(con->sdu, &input,
-					    1, TIME_US2I(1));
-		if (bytes_read != 0) {
-			buff[i++] = input;
-		}
-		chThdYield();
-	}
-}
+#define SLCAN_USB_CHUNK 64
+#define SLCAN_RING_LEN  512
+#define SLCAN_TXQ_LEN   48
 
-static THD_FUNCTION(can_reader_thread, arg)
+static uint8_t slcan_ring[SLCAN_RING_LEN];
+static unsigned slcan_ring_n;
+static can_tx_frame slcan_txq[SLCAN_TXQ_LEN];
+static unsigned slcan_txq_h, slcan_txq_t, slcan_txq_n;
+
+/* Drop RX ASCII rather than block TX on a busy CDC. Vehicle emu needs TX first. */
+static void slcan_write_nb(t_hydra_console *con, const char *data, size_t n)
 {
-	t_hydra_console *con;
-	con = arg;
-	chRegSetThreadName("CAN reader");
-	chThdSleepMilliseconds(10);
-	can_rx_frame rx_msg;
-	mode_config_proto_t* proto = &con->mode->proto;
+	chnWriteTimeout(con->sdu, (const uint8_t *)data, n, TIME_IMMEDIATE);
+}
 
-	while (!chThdShouldTerminateX()) {
-		if(bsp_can_rxne(proto->dev_num)) {
-			bsp_can_read(proto->dev_num, &rx_msg);
-			can_slcan_out(con, &rx_msg);
+static bool slcan_pop_line(uint8_t *buff)
+{
+	unsigned i;
+
+	for (i = 0; i < slcan_ring_n; i++) {
+		if (slcan_ring[i] == '\r') {
+			unsigned n = i;
+			if (n >= SLCAN_BUFF_LEN)
+				n = SLCAN_BUFF_LEN - 1;
+			memcpy(buff, slcan_ring, n);
+			buff[n] = 0;
+			i++;
+			slcan_ring_n -= i;
+			if (slcan_ring_n)
+				memmove(slcan_ring, slcan_ring + i, slcan_ring_n);
+			return true;
 		}
-		chThdYield();
+	}
+	return false;
+}
+
+static void slcan_poll_usb(t_hydra_console *con)
+{
+	uint8_t chunk[SLCAN_USB_CHUNK];
+	size_t n;
+
+	for (;;) {
+		if (slcan_ring_n + sizeof(chunk) > SLCAN_RING_LEN)
+			return;
+		n = chnReadTimeout(con->sdu, chunk, sizeof(chunk), TIME_IMMEDIATE);
+		if (n == 0)
+			return;
+		if (slcan_ring_n + n > SLCAN_RING_LEN)
+			return;
+		memcpy(slcan_ring + slcan_ring_n, chunk, n);
+		slcan_ring_n += n;
 	}
 }
 
+static void slcan_txq_kick(mode_config_proto_t *proto)
+{
+	while (slcan_txq_n) {
+		if (bsp_can_try_write(proto->dev_num, &slcan_txq[slcan_txq_t]) != BSP_OK)
+			return;
+		slcan_txq_t = (slcan_txq_t + 1) % SLCAN_TXQ_LEN;
+		slcan_txq_n--;
+	}
+}
+
+static bool slcan_txq_push(const can_tx_frame *msg)
+{
+	if (slcan_txq_n >= SLCAN_TXQ_LEN)
+		return false;
+	slcan_txq[slcan_txq_h] = *msg;
+	slcan_txq_h = (slcan_txq_h + 1) % SLCAN_TXQ_LEN;
+	slcan_txq_n++;
+	return true;
+}
+
+/* Same order as CANable: USB commands + TX first, then a short RX burst. */
 void slcan(t_hydra_console *con) {
 	uint8_t buff[SLCAN_BUFF_LEN];
 	can_tx_frame tx_msg;
+	can_rx_frame rx_msg;
 	mode_config_proto_t* proto = &con->mode->proto;
-	thread_t *rthread = NULL;
+	bool rx_on = false;
+	unsigned rx_burst;
 
-	while (!hydrabus_ubtn()) {
-		memset(buff, 0, sizeof(buff));
-		slcan_read_command(con, buff);
-		switch (buff[0]) {
-		case 'S':
-			/*CAN speed*/
-			switch(buff[1]) {
-			case '0':
-				proto->config.can.dev_speed = 10000;
-				break;
-			case '1':
-				proto->config.can.dev_speed = 20000;
-				break;
-			case '2':
-				proto->config.can.dev_speed = 50000;
-				break;
-			case '3':
-				proto->config.can.dev_speed = 100000;
-				break;
-			case '4':
-				proto->config.can.dev_speed = 125000;
-				break;
-			case '5':
-				proto->config.can.dev_speed = 250000;
-				break;
-			case '6':
-				proto->config.can.dev_speed = 500000;
-				break;
-			case '7':
-				proto->config.can.dev_speed = 800000;
-				break;
-			case '8':
-				proto->config.can.dev_speed = 1000000;
-				break;
-			case '9':
-				proto->config.can.dev_speed = 2000000;
-				break;
+	slcan_ring_n = 0;
+	slcan_txq_h = slcan_txq_t = slcan_txq_n = 0;
+	for (;;) {
+		slcan_poll_usb(con);
+		while (slcan_pop_line(buff)) {
+			if (buff[0] == 0) {
+				slcan_write_nb(con, "\r", 1);
+				continue;
 			}
-
-			if(bsp_can_set_speed(proto->dev_num, proto->config.can.dev_speed) == BSP_OK) {
-				cprint(con, "\r", 1);
-			}else {
-				cprint(con, "\x07", 1);
-			}
-			break;
-		case 's':
-			/*BTR value*/
-			/*Not implemented*/
-			cprint(con, "\x07", 1);
-			break;
-		case 'O':
-			/*Open channel*/
-			if(rthread == NULL) {
-				rthread = chThdCreateFromHeap(NULL,
-							      CONSOLE_WA_SIZE,
-							      "SLCAN reader",
-							      LOWPRIO,
-							      can_reader_thread,
-							      con);
-				cprint(con, "\r", 1);
-			} else {
-				cprint(con, "\x07", 1);
-			}
-			break;
-		case 'C':
-			/*Close channel*/
-			if(rthread != NULL) {
-				chThdTerminate(rthread);
-				chThdWait(rthread);
-				rthread = NULL;
-			}
-			cprint(con, "\r", 1);
-			break;
-		case 't':
-		case 'T':
-		case 'r':
-		case 'R':
-			/*Transmit*/
-			if(can_slcan_in(buff, &tx_msg) == BSP_OK) {
-				if(bsp_can_write(proto->dev_num, &tx_msg) == BSP_OK) {
-					cprint(con, "\r", 1);
-				}else {
-					cprint(con, "\x07", 1);
+			switch (buff[0]) {
+			case 'S':
+				switch(buff[1]) {
+				case '0': proto->config.can.dev_speed = 10000; break;
+				case '1': proto->config.can.dev_speed = 20000; break;
+				case '2': proto->config.can.dev_speed = 50000; break;
+				case '3': proto->config.can.dev_speed = 100000; break;
+				case '4': proto->config.can.dev_speed = 125000; break;
+				case '5': proto->config.can.dev_speed = 250000; break;
+				case '6': proto->config.can.dev_speed = 500000; break;
+				case '7': proto->config.can.dev_speed = 800000; break;
+				case '8': proto->config.can.dev_speed = 1000000; break;
+				case '9': proto->config.can.dev_speed = 2000000; break;
 				}
-			} else {
-				cprint(con, "\x07", 1);
+				if (bsp_can_set_speed(proto->dev_num, proto->config.can.dev_speed) == BSP_OK)
+					slcan_write_nb(con, "\r", 1);
+				else
+					slcan_write_nb(con, "\x07", 1);
+				break;
+			case 's':
+				slcan_write_nb(con, "\x07", 1);
+				break;
+			case 'O':
+				if (proto->config.can.dev_mode == BSP_CAN_MODE_RO)
+					bsp_can_mode_rw(proto->dev_num, proto);
+				rx_on = true;
+				slcan_write_nb(con, "\r", 1);
+				break;
+			case 'C':
+				rx_on = false;
+				slcan_write_nb(con, "\r", 1);
+				break;
+			case 't':
+			case 'T':
+			case 'r':
+			case 'R':
+				if (can_slcan_in(buff, &tx_msg) == BSP_OK && slcan_txq_push(&tx_msg)) {
+					slcan_write_nb(con, "\r", 1);
+					slcan_txq_kick(proto);
+				} else {
+					slcan_write_nb(con, "\x07", 1);
+				}
+				break;
+			case 'F':
+				break;
+			case 'M':
+				proto->config.can.filter_id = *(uint32_t *) &buff[1];
+				proto->config.can.filter_id = reverse_u32(proto->config.can.filter_id);
+				bsp_can_set_filter(proto->dev_num, proto);
+				slcan_write_nb(con, "\r", 1);
+				break;
+			case 'm':
+				proto->config.can.filter_mask = *(uint32_t *) &buff[1];
+				proto->config.can.filter_mask = reverse_u32(proto->config.can.filter_mask);
+				bsp_can_set_filter(proto->dev_num, proto);
+				slcan_write_nb(con, "\r", 1);
+				break;
+			case 'V':
+				slcan_write_nb(con, "V0101\r", 6);
+				break;
+			case 'N':
+				slcan_write_nb(con, "NHYDR\r", 6);
+				break;
+			case 'Z':
+				slcan_write_nb(con, "\x07", 1);
+				break;
+			default:
+				slcan_write_nb(con, "\x07", 1);
+				break;
 			}
-
-			break;
-		case 'F':
-			/*status*/
-			break;
-		case 'M':
-			proto->config.can.filter_id = *(uint32_t *) &buff[1];
-			proto->config.can.filter_id = reverse_u32(proto->config.can.filter_id);
-			bsp_can_set_filter(proto->dev_num, proto);
-			break;
-		case 'm':
-			proto->config.can.filter_mask = *(uint32_t *) &buff[1];
-			proto->config.can.filter_mask = reverse_u32(proto->config.can.filter_mask);
-			bsp_can_set_filter(proto->dev_num, proto);
-			break;
-		case 'V':
-			/*Version*/
-			cprint(con, "V0101\r", 6);
-			break;
-		case 'N':
-			/*Serial*/
-			cprint(con, "NHYDR\r", 6);
-			break;
-		case 'Z':
-			/*Timestamp*/
-			/*Not implemented*/
-			cprint(con, "\x07", 1);
-			break;
-		default:
-			cprint(con, "\x07", 1);
-			break;
 		}
+		slcan_txq_kick(proto);
+		if (rx_on) {
+			for (rx_burst = 0; rx_burst < 3 && bsp_can_rxne(proto->dev_num); rx_burst++) {
+				bsp_can_read(proto->dev_num, &rx_msg);
+				can_slcan_out(con, &rx_msg);
+			}
+		}
+		chThdYield();
 	}
-	if(rthread != NULL) {
-		chThdTerminate(rthread);
-		chThdWait(rthread);
-		rthread = NULL;
-	}
+}
+
+void slcan_boot(t_hydra_console *con)
+{
+	mode_config_proto_t* proto = &con->mode->proto;
+
+	init_proto_default(con);
+	proto->config.can.dev_speed = 125000;
+	proto->config.can.dev_mode = BSP_CAN_MODE_RW;
+	bsp_can_init(proto->dev_num, proto);
+	bsp_can_init_filter(proto->dev_num, proto);
+	slcan(con);
 }
 
 static int init(t_hydra_console *con, t_tokenline_parsed *p)

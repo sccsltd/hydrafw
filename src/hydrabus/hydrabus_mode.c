@@ -42,7 +42,9 @@ extern t_token_dict tl_dict[];
 extern const mode_exec_t mode_spi_exec;
 extern const mode_exec_t mode_i2c_exec;
 extern const mode_exec_t mode_uart_exec;
+#ifdef HYDRANFC
 extern const mode_exec_t mode_nfc_exec;
+#endif
 extern const mode_exec_t mode_jtag_exec;
 extern const mode_exec_t mode_onewire_exec;
 extern const mode_exec_t mode_twowire_exec;
