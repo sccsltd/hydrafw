@@ -169,6 +169,7 @@ const t_token_dict tl_dict[] = {
 	{ T_SWIO, "swio" },
 	{ T_CONTINUITY, "continuity" },
 	{ T_BIDIR, "bidir" },
+	{ T_DFU, "dfu" },
 	/* Developer warning add new command(s) here */
 
 	/* BP-compatible commands */
@@ -2100,6 +2101,10 @@ t_token tokens_logging[] = {
 };
 
 t_token tl_tokens[] = {
+	{
+		T_DFU,
+		.help = "Reboot into USB DFU bootloader"
+	},
 	{
 		T_HELP,
 		.arg_type = T_ARG_HELP,

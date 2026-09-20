@@ -161,6 +161,7 @@ enum {
 	T_SWIO,
 	T_CONTINUITY,
 	T_BIDIR,
+	T_DFU,
 	/* Developer warning add new command(s) here */
 
 	/* BP-compatible commands */

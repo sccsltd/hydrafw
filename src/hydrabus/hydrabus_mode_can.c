@@ -317,6 +317,12 @@ void slcan(t_hydra_console *con) {
 			case 'N':
 				slcan_write_nb(con, "NHYDR\r", 6);
 				break;
+			case 'D':
+				/* Ford bench extension: remotely enter STM32 ROM DFU. */
+				slcan_write_nb(con, "\r", 1);
+				chThdSleepMilliseconds(20);
+				reboot_usb_dfu();
+				break;
 			case 'Z':
 				slcan_write_nb(con, "\x07", 1);
 				break;

@@ -12,6 +12,8 @@ This fork carries the HydraBus changes used by the MK5IPC Ford bench:
 * OpenOCD `FEATURE_SRST` control on PB7 for Ford SPC5 targets. PB7 is driven
   low to assert reset and changed to a high-impedance input to release it, so
   the target's 5 V reset pull-up is never driven by a 3.3 V Hydra output.
+* software DFU entry using the top-level `dfu` console command or the custom
+  SLCAN command `D\r` while a CAN channel is active.
 
 The normal combined image keeps the console, CAN and JTAG modes:
 

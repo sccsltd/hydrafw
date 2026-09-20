@@ -85,6 +85,9 @@ uint32_t bsp_get_apb1_freq(void);
 /* Check if UBTN is pressed after reset then enter USB DFU */
 void bsp_enter_usb_dfu(void);
 
+/* Reboot immediately into the STM32 ROM USB DFU bootloader. */
+void reboot_usb_dfu(void);
+
 /* Enable SCS DWT Cycle Counter for cycle accurate measurements */
 void bsp_scs_dwt_cycle_counter_enabled(void);
 

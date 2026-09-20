@@ -26,6 +26,7 @@
 #include "ff.h"
 #include "microsd.h"
 #include "hydrabus_sd.h"
+#include "bsp.h"
 
 #include "common.h"
 #include "debug.h"
@@ -53,6 +54,15 @@ static int print_clear(t_hydra_console *con, t_tokenline_parsed *p)
 	print(con,"\033[2J"); // ESC seq to clear entire screen
 	print(con,"\033[H");  // ESC seq to move cursor at left-top corner
 
+	return TRUE;
+}
+
+static int cmd_dfu(t_hydra_console *con, t_tokenline_parsed *p)
+{
+	(void)p;
+	cprintf(con, "Entering USB DFU.\r\n");
+	chThdSleepMilliseconds(20);
+	reboot_usb_dfu();
 	return TRUE;
 }
 
@@ -193,6 +203,7 @@ static struct cmd_map {
 	int token;
 	cmdfunc func;
 } top_commands[] = {
+	{ T_DFU, cmd_dfu },
 	{ T_CLEAR, print_clear },
 	{ T_DEBUG, cmd_debug },
 	{ T_SHOW, cmd_show },
